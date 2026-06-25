@@ -53,12 +53,10 @@ class Logger:
             course_code: The identifier for the course.
             target_term: The target academic term (e.g., '2024-2025').
         """
-        banner_text = (
-            f"[bold cyan]Course:[/bold cyan] {course_code}\n[bold cyan]Term:[/bold cyan] {target_term}\n"
-        )
+        banner_text = f"[bold cyan]Target Course:[/bold cyan] {course_code}\n[bold cyan]Term:[/bold cyan] {target_term}\n"
         panel = Panel(
             banner_text,
-            title="[bold green]Blackboard-Sync started[/bold green]",
+            title="[bold green]Blackboard-Sync[/bold green]",
             expand=False,
             border_style="green",
         )

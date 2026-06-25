@@ -34,6 +34,13 @@ class Config:
     TIMEOUT_SECONDS: int = 60
     RETRY_ATTEMPTS: int = 3
 
+    # Playwright timeouts (milliseconds)
+    NETWORK_WAIT_MS: int = 35000
+    USER_WAIT_MS: int = 15000
+    FAST_LOGIN_WAIT_MS: int = 10000
+    MFA_USER_WAIT_MS: int = 150000
+    SHORT_WAIT_MS: int = 4000
+
     def __new__(cls, *args, **kwargs) -> Config:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
