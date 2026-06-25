@@ -20,3 +20,10 @@ logs/
 
 # Local downloads
 downloads/
+
+# Build artifacts*.egg
+*.tar.gz
+*.whl
+
+# Roadmap
+docs/ROADMAP.md

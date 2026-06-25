@@ -5,8 +5,6 @@ description = "Idempotent Blackboard Ultra Course Downloader"
 authors = [
     { name = "Ertan Tunç Türk", email = "turke@mef.edu.tr" },
 ]
-license = { text = "MIT" }
-license-file = "LICENSE"
 keywords = ["blackboard", "sync", "downloader"]
 readme = "README.md"
 requires-python = ">=3.14"

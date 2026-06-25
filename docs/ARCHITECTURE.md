@@ -10,7 +10,6 @@ The system enforces strict Separation of Concerns (SoC). Do NOT mix DOM parsing 
 
 blackboard-sync/
 ├── tests/ # Local test destination
-├── logs/ # Local logging destination
 ├── .env # Credentials (USERNAME, PASSWORD)
 ├── downloads/ # Local mirroring destination for downloaded files
 ├── .state/ # Directory holding Playwright's storage_state.json
