@@ -1,7 +1,69 @@
 [project]
 name = "blackboard-sync"
 version = "0.1.0"
-description = "Add your description here"
+description = "Idempotent Blackboard Ultra Course Downloader"
+authors = [
+    { name = "Ertan Tunç Türk", email = "turke@mef.edu.tr" },
+]
+license = { text = "MIT" }
+license-file = "LICENSE"
+keywords = ["blackboard", "sync", "downloader"]
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "playwright>=1.60.0",
+    "python-dotenv>=1.2.2",
+    "rich>=15.0.0",
+    "tqdm>=4.68.3",
+    "typer>=0.26.7",
+]
+
+[dependency-groups]
+dev = [
+    "bandit>=1.9.4",
+    "pytest>=9.1.1",
+    "ruff>=0.15.19",
+    "ty>=0.0.53",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py314"
+
+[tool.ruff.lint]
+extend-select = [
+    "F",
+    "W",
+    "E",
+    "I",
+    "UP",
+    "C4",
+    "FA",
+    "ISC",
+    "ICN",
+    "RET",
+    "SIM",
+    "TID",
+    "TC",
+    "PTH",
+    "TD",
+    "NPY",
+    "FURB",
+]
+
+ignore = ["E501", "UP035", "TC001", "SIM117", "UP028", "SIM105"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+"__init__.py" = ["F401"]
+
+[tool.bandit]
+exclude_dirs = [
+    "tests"
+]
+
+[tool.ty.environment]
+python = "./.venv"
+
+[tool.ty.rules]
+unresolved-import = "warn"
