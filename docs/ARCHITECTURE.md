@@ -9,6 +9,7 @@ Blackboard-Sync is a robust, modular web-automation tool built with Python and P
 The system enforces strict Separation of Concerns (SoC). Do NOT mix DOM parsing with download logic.
 
 blackboard-sync/
+├── tests/ # Local test destination
 ├── logs/ # Local logging destination
 ├── .env # Credentials (USERNAME, PASSWORD)
 ├── downloads/ # Local mirroring destination for downloaded files
