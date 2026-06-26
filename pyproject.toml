@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "blackboard-sync"
-version = "0.1.0"
+version = "1.0.0"
 description = "Idempotent Blackboard Ultra Course Downloader"
 authors = [
     { name = "Ertan Tunç Türk", email = "turke@mef.edu.tr" },
@@ -67,3 +71,10 @@ python = "./.venv"
 
 [tool.ty.rules]
 unresolved-import = "warn"
+
+[project.scripts]
+bb = "src.main:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
