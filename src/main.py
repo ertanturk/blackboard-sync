@@ -7,11 +7,14 @@ from enum import IntEnum
 from typing import Annotated
 
 import typer
+from playwright.sync_api import sync_playwright
 from rich.console import Console
 from rich.panel import Panel
 
 from src.auth.authenticator import login_or_load_state
 from src.config import Config, ConfigError
+from src.crawler.navigator import navigate_to_course
+from src.crawler.parser import parse_course_content
 from src.logger.logger import Logger
 
 
@@ -75,7 +78,7 @@ def sync(
 
     try:
         # Load and validate Configuration
-        Config()
+        config = Config()
 
         target_term = os.getenv("TARGET_TERM")
         if not target_term:
@@ -102,11 +105,33 @@ def sync(
         cli_logger.success(f"Authentication phase complete. Session active via: {state_path.name}")
 
         cli_logger.info("\n[bold]Phase 2: Navigation & Discovery[/bold]")
-        # download_queue = crawler.get_download_queue(course_code=course)
-        # if not download_queue:
-        #     cli_logger.error(f"Could not find course '{course}' or it contains no downloadable files.")
-        #     sys.exit(ExitCode.COURSE_NOT_FOUND)
-        cli_logger.success("Discovery phase complete. Found X files.")
+        download_queue = []
+        cli_logger.info("Playwright browser started with latest logined account.")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=not headful)
+            context = browser.new_context(storage_state=state_path)
+            page = context.new_page()
+
+            nav_success = navigate_to_course(page, course_code=course)
+            if not nav_success:
+                cli_logger.error(f"Could not find or enter accessible course '{course}'.")
+                browser.close()
+                sys.exit(ExitCode.COURSE_NOT_FOUND)
+
+            download_queue = parse_course_content(
+                page=page, course_code=course, install_dir=config.INSTALL_DIR
+            )
+
+            browser.close()
+
+        if not download_queue:
+            cli_logger.warning(f"Course '{course}' contains no downloadable files.")
+        else:
+            cli_logger.success(f"Discovery phase complete. Found {len(download_queue)} files.")
+            for file_node in download_queue:
+                cli_logger.info(
+                    f" -> İndirilecek: {file_node.TITLE} ({file_node.FILE_TYPE}) | Hedef: {file_node.LOCAL_TARGET_PATH.parent.name}"
+                )
 
         cli_logger.info("\n[bold]Phase 3: Synchronization[/bold]")
         # stats = downloader.process_queue(queue=download_queue, force_override=force)

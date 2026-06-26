@@ -19,7 +19,9 @@ dependencies = [
 [dependency-groups]
 dev = [
     "bandit>=1.9.4",
+    "beautifulsoup4>=4.15.0",
     "pytest>=9.1.1",
+    "requests>=2.34.2",
     "ruff>=0.15.19",
     "ty>=0.0.53",
 ]

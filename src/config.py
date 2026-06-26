@@ -35,11 +35,64 @@ class Config:
     RETRY_ATTEMPTS: int = 3
 
     # Playwright timeouts (milliseconds)
-    NETWORK_WAIT_MS: int = 35000
-    USER_WAIT_MS: int = 15000
+    NETWORK_WAIT_MS: int = 30000
+    USER_WAIT_MS: int = 10000
     FAST_LOGIN_WAIT_MS: int = 10000
-    MFA_USER_WAIT_MS: int = 150000
+    MFA_USER_WAIT_MS: int = 100000
     SHORT_WAIT_MS: int = 4000
+    UI_WAIT_TIMEOUT: int = 10000
+    CLICK_WAIT_TIMEOUT: int = 5000
+
+    # Valid file extensions to download
+    VALID_EXTENSIONS: set[str] = {
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".ppt",
+        ".pptx",
+        ".xls",
+        ".xlsx",
+        ".txt",
+        ".rtf",
+        ".csv",
+        ".zip",
+        ".png",
+        ".jpg",
+        ".jpeg",
+    }
+
+    # Folders to completely ignore during the recursive crawl
+    EXCLUDE_FOLDERS: set[str] = {
+        "zoom",
+        "assignment",
+        "homework",
+        "quiz",
+        "exam",
+        "syllabus",
+        "discussion",
+        "grade",
+        "turnitin",
+        "sınav",
+        "ödev",
+        "proje",
+    }
+
+    # Keywords to match in item titles for download filtering
+    KEYWORDS = [
+        "Course Content",
+        "Ders İçeriği",
+        "Proje",
+        "Project",
+        "Lecture",
+        "Ders",
+        "Lectures",
+        "Lecture Notes",
+        "Documents",
+        "Belgeler",
+        "Materials",
+        "Materyaller",
+        "Resources",
+    ]
 
     def __new__(cls, *args, **kwargs) -> Config:
         if cls._instance is None:
