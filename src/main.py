@@ -99,7 +99,11 @@ def sync(
         config.load_config()
 
         # Display the custom startup banner defined in logger.py
-        cli_logger.print_banner(course_code=course, target_term=os.getenv("TARGET_TERM", "Unknown Term"))
+        cli_logger.print_banner(
+            course_code=course,
+            target_term=os.getenv("TARGET_TERM", "Unknown Term"),
+            install_dir=str(download_path) if download_path is not None else str(config.INSTALL_DIR),
+        )
 
         with console.status(
             "[bold green]Phase 1: Authenticating with Blackboard...[/bold green]", spinner="dots"

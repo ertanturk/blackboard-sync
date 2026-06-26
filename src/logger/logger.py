@@ -46,14 +46,17 @@ class Logger:
             ],
         )
 
-    def print_banner(self, course_code: str, target_term: str) -> None:
+    def print_banner(self, course_code: str, target_term: str, install_dir: str | None = None) -> None:
         """Prints a formatted startup banner to the console.
 
         Args:
             course_code: The identifier for the course.
             target_term: The target academic term (e.g., '2024-2025').
+            install_dir: The directory where the application is installed.
         """
         banner_text = f"[bold cyan]Target Course:[/bold cyan] {course_code}\n[bold cyan]Term:[/bold cyan] {target_term}\n"
+        if install_dir is not None:
+            banner_text += f"[bold cyan]Install Dir:[/bold cyan] {install_dir}\n"
         panel = Panel(
             banner_text,
             title="[bold green]Blackboard-Sync[/bold green]",
