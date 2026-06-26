@@ -258,7 +258,6 @@ def _walk_classic_directory(
                 link_node = item.locator("h3 a").first
                 if link_node.count() > 0:
                     href = link_node.get_attribute("href") or ""
-                    # Classic'te href doğrudan "/bbcswebdav/..." adresidir!
                     download_url = f"{base_url}{href}?download=true" if href.startswith("/") else href
                 else:
                     download_url = ""
@@ -362,17 +361,15 @@ def _parse_modern_api(
                 logger.debug("Skipping API item with no id (title='%s').", title)
                 continue
 
-            if handler == "resource/x-bb-folder":
+            if handler in ("resource/x-bb-folder", "resource/x-bb-lesson"):
                 # isBbPage=True means a Blackboard-rendered page, not a real folder
                 content_detail: dict[str, Any] = item.get("contentDetail", {})
-                folder_detail: dict[str, Any] = content_detail.get("resource/x-bb-folder", {})
+                folder_detail: dict[str, Any] = content_detail.get(handler, {})
                 if folder_detail.get("isBbPage", False):
                     logger.debug("Skipping isBbPage folder: %s", title)
                     continue
 
-                if is_reviewable:
-                    # isReviewable=True on a folder is unusual; treat cautiously as skip
-                    logger.debug("Skipping reviewable folder (unexpected state): %s", title)
+                if folder_detail.get("isBbPage", False):
                     continue
 
                 if _should_exclude_folder(title):
@@ -384,7 +381,7 @@ def _parse_modern_api(
                     page,
                     course_id,
                     item_id,
-                    current_path / sanitized_title,
+                    current_path / _sanitize_name(title),
                     download_queue,
                     visited_ids,
                     max_depth - 1,
