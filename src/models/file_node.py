@@ -1,7 +1,9 @@
 """Data structure for Blackboard-Sync."""
 
+from __future__ import annotations
+
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,7 +20,10 @@ class FileNode:
         LOCAL_TARGET_PATH: The absolute or relative local filesystem path for this node.
         BLACKBOARD_ID: The unique identifier assigned by Blackboard, if any.
         IS_FOLDER: Boolean indicating if this node represents a directory instead of a file.
-        BLACKBOARD_URL: The direct URL to the item on Blackboard Ultra, if available.
+        BLACKBOARD_DOWNLOAD_URL: The direct URL to the item on Blackboard Ultra, if available.
+        COOKIES: Session cookies (name -> value) scoped to BLACKBOARD_DOWNLOAD_URL,
+            required to authenticate a direct HTTP fetch of that URL. Excluded from
+            repr() to avoid leaking live session credentials into logs or debuggers.
     """
 
     TITLE: str
@@ -26,7 +31,8 @@ class FileNode:
     LOCAL_TARGET_PATH: Path
     BLACKBOARD_ID: str | None = None
     IS_FOLDER: bool = False
-    BLACKBOARD_URL: str | None = None
+    BLACKBOARD_DOWNLOAD_URL: str | None = None
+    COOKIES: dict[str, str] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Sanitizes the title to ensure it's a valid filename on all operating systems.

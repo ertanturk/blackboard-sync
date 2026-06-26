@@ -4,17 +4,21 @@ import os
 import sys
 import time
 from enum import IntEnum
+from pathlib import Path
 from typing import Annotated
 
 import typer
 from playwright.sync_api import sync_playwright
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
+from rich.table import Table
 
 from src.auth.authenticator import login_or_load_state
 from src.config import Config, ConfigError
 from src.crawler.navigator import navigate_to_course
 from src.crawler.parser import parse_course_content
+from src.downloader.sync_manager import process_queue
 from src.logger.logger import Logger
 
 
@@ -34,6 +38,8 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 
+console = Console()
+
 
 @app.command()
 def sync(
@@ -44,6 +50,7 @@ def sync(
             "-c",
             help="[bold cyan]Target course code[/bold cyan] (e.g., CS301, BIL301)",
             show_default=False,
+            rich_help_panel="Targeting Options",
         ),
     ],
     force: Annotated[
@@ -52,6 +59,7 @@ def sync(
             "--force",
             "-f",
             help="Ignore local files and [red]force redownload[/red] everything.",
+            rich_help_panel="Behavior Options",
         ),
     ] = False,
     headful: Annotated[
@@ -59,107 +67,129 @@ def sync(
         typer.Option(
             "--headful",
             "-h",
-            help="Run browser in [yellow]visible mode[/yellow] (useful for debugging or first-time MFA).",
+            help="Run browser in visible mode (useful for debugging).",
+            rich_help_panel="Behavior Options",
         ),
     ] = False,
+    download_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--download-path",
+            "-d",
+            help="Path to save downloaded files.",
+            rich_help_panel="Targeting Options",
+        ),
+    ] = None,
 ) -> None:
-    """Synchronizes course materials from Blackboard Ultra to your local machine.
-
-    Args:
-        course: The target course code to search for and download.
-        force: If True, bypasses local idempotency checks and overwrites existing files.
-        headful: If True, launches the Playwright browser with a visible GUI.
-    """
+    """Synchronizes course materials from Blackboard to your local machine."""
     start_time = time.time()
 
-    console = Console()
     cli_logger = Logger(console)
     cli_logger.setup_logger()
 
+    # Empty line for clean terminal startup
+    console.print()
+
     try:
-        # Load and validate Configuration
-        config = Config()
+        if download_path is not None:
+            path = Path(download_path)
+            config = Config(install_dir=path)
+        else:
+            config = Config()
+        config.load_config()
 
-        target_term = os.getenv("TARGET_TERM")
-        if not target_term:
-            cli_logger.error("TARGET_TERM is missing from the environment.")
-            sys.exit(ExitCode.CONFIG_ERROR)
+        # Display the custom startup banner defined in logger.py
+        cli_logger.print_banner(course_code=course, target_term=os.getenv("TARGET_TERM", "Unknown Term"))
 
-        # Print Corporate Banner
-        cli_logger.print_banner(course_code=course, target_term=target_term)
-
-        if force:
-            cli_logger.warning("Force mode activated. Idempotency checks will be bypassed.")
-        if headful:
-            cli_logger.warning("Headful mode activated. Browser GUI will be visible.")
-
-        # --- ARCHITECTURE PHASES (Placeholders) ---
-
-        cli_logger.info("\n[bold]Phase 1: Authentication[/bold]")
-        state_path = login_or_load_state(headful=headful)
+        with console.status(
+            "[bold green]Phase 1: Authenticating with Blackboard...[/bold green]", spinner="dots"
+        ):
+            state_path = login_or_load_state(headful=headful)
 
         if not state_path:
-            cli_logger.error("Authentication failed. Check your .env credentials or MFA status.")
+            cli_logger.error("Authentication failed. Aborting synchronization.")
             sys.exit(ExitCode.AUTH_FAILURE)
 
-        cli_logger.success(f"Authentication phase complete. Session active via: {state_path.name}")
+        cli_logger.info("[bold green]SUCCESS:[/bold green] Authentication verified.")
 
-        cli_logger.info("\n[bold]Phase 2: Navigation & Discovery[/bold]")
-        download_queue = []
-        cli_logger.info("Playwright browser started with latest logined account.")
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=not headful)
-            context = browser.new_context(storage_state=state_path)
-            page = context.new_page()
+        with console.status(
+            f"[bold cyan]Phase 2: Discovering materials for {course}...[/bold cyan]", spinner="dots"
+        ):
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=not headful)
+                context = browser.new_context(storage_state=state_path)
+                page = context.new_page()
 
-            nav_success = navigate_to_course(page, course_code=course)
-            if not nav_success:
-                cli_logger.error(f"Could not find or enter accessible course '{course}'.")
+                # Navigate to the target course
+                course_found = navigate_to_course(page, course)
+                if not course_found:
+                    cli_logger.error(f"Could not find or enter accessible course '{course}'.")
+                    sys.exit(ExitCode.COURSE_NOT_FOUND)
+
+                # Parse and build the download queue
+                download_queue = parse_course_content(page, course, config.INSTALL_DIR)
                 browser.close()
-                sys.exit(ExitCode.COURSE_NOT_FOUND)
 
-            download_queue = parse_course_content(
-                page=page, course_code=course, install_dir=config.INSTALL_DIR
-            )
+        cli_logger.info(
+            f"[bold cyan]SUCCESS:[/bold cyan] Discovery phase complete. Found {len(download_queue)} files."
+        )
 
-            browser.close()
+        if download_queue:
+            table = Table(title="Discovered Materials", border_style="cyan", box=box.SIMPLE)
+            table.add_column("File Name", style="white", no_wrap=False)
+            table.add_column("Type", style="magenta", justify="center")
+            table.add_column("Target Folder", style="dim")
 
-        if not download_queue:
-            cli_logger.warning(f"Course '{course}' contains no downloadable files.")
-        else:
-            cli_logger.success(f"Discovery phase complete. Found {len(download_queue)} files.")
             for file_node in download_queue:
-                cli_logger.info(
-                    f" -> İndirilecek: {file_node.TITLE} ({file_node.FILE_TYPE}) | Hedef: {file_node.LOCAL_TARGET_PATH.parent.name}"
+                table.add_row(
+                    file_node.TITLE, file_node.FILE_TYPE.upper(), file_node.LOCAL_TARGET_PATH.parent.name
                 )
 
-        cli_logger.info("\n[bold]Phase 3: Synchronization[/bold]")
-        # stats = downloader.process_queue(queue=download_queue, force_override=force)
+            console.print()
+            console.print(table)
+            console.print()
 
-        # Mocking stats for the draft
-        stats = {"total": 10, "downloaded": 2, "skipped": 8, "errors": 0}
-        cli_logger.success("Synchronization phase complete.")
+        with console.status("[bold blue]Phase 3: Synchronization in progress...[/bold blue]", spinner="dots"):
+            stats = process_queue(
+                queue=download_queue,
+                state_path=state_path,
+                force_override=force,
+                max_threads=8,
+                install_dir=config.INSTALL_DIR,
+            )
 
-        # Print Final Summary using Rich Panel
+        cli_logger.info("[bold blue]SUCCESS:[/bold blue] Synchronization phase complete.")
+
         duration = time.time() - start_time
         summary_text = (
             f"[bold]Total Found:[/bold] {stats['total']}\n"
             f"[bold green]Downloaded:[/bold green] {stats['downloaded']}\n"
             f"[bold yellow]Skipped:[/bold yellow] {stats['skipped']}\n"
             f"[bold red]Errors:[/bold red] {stats['errors']}\n\n"
-            f"[dim]Duration: {duration:.2f}s[/dim]"
+            f"[bold purple]Download files to:[/bold purple] {stats['install_dir']}\n"
+            f"[dim]Duration: {duration:.2f}s[/dim]\n\n"
+            "[italic]Thanks for using Blackboard Sync.[/italic]"
         )
+
         console.print()
-        console.print(Panel(summary_text, title="[bold blue]Sync Summary[/bold blue]", expand=False))
+        console.print(
+            Panel(
+                summary_text,
+                title="[bold blue]Sync Summary[/bold blue]",
+                border_style="blue",
+                box=box.ROUNDED,
+                expand=False,
+                padding=(1, 2),
+            )
+        )
 
         sys.exit(ExitCode.SUCCESS)
 
     except ConfigError as ce:
-        cli_logger.error(f"Configuration Error: {ce.message}")
+        console.print(f"[bold red]Configuration Error:[/bold red] {ce.message}")
         sys.exit(ExitCode.CONFIG_ERROR)
     except Exception as e:
-        # Catch-all for unexpected Playwright or Network crashes
-        cli_logger.error(f"An unexpected system error occurred: {e}")
+        console.print(f"[bold red]An unexpected system error occurred:[/bold red] {e}")
         sys.exit(ExitCode.NETWORK_ERROR)
 
 

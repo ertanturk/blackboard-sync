@@ -40,8 +40,8 @@ class Config:
     FAST_LOGIN_WAIT_MS: int = 10000
     MFA_USER_WAIT_MS: int = 100000
     SHORT_WAIT_MS: int = 4000
-    UI_WAIT_TIMEOUT: int = 10000
-    CLICK_WAIT_TIMEOUT: int = 5000
+    UI_WAIT_TIMEOUT: int = 6000
+    CLICK_WAIT_TIMEOUT: int = 2000
 
     # Valid file extensions to download
     VALID_EXTENSIONS: set[str] = {

@@ -93,7 +93,7 @@ def navigate_to_course(page: Page, course_code: str) -> bool:
         logger.error("Course code '%s' contains no matchable characters after sanitization.", course_code)
         return False
 
-    global_timeout = Config.TIMEOUT_SECONDS * 1000
+    global_timeout = Config.TIMEOUT_SECONDS * 100
 
     try:
         courses_url = f"{base_url}/ultra/course"

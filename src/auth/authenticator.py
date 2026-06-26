@@ -5,8 +5,10 @@ Handles Hybrid MFA auto-login and session state persistence via Playwright.
 
 import json
 import logging
+import os
 from pathlib import Path
 
+import requests
 from playwright.sync_api import Browser, BrowserContext, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -19,6 +21,32 @@ logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 STATE_DIR = BASE_DIR / ".state"
 STATE_FILE = STATE_DIR / "storage_state.json"
+
+
+def _is_state_valid(state_file: Path) -> bool:
+    """Performs a sub-second headless validation of the saved cookies.
+
+    Pings the Blackboard API to ensure the session is still active on the server.
+    """
+    try:
+        with Path(state_file).open("r", encoding="utf-8") as f:
+            state = json.load(f)
+
+        session = requests.Session()
+        for cookie in state.get("cookies", []):
+            session.cookies.set(cookie["name"], cookie["value"], domain=cookie["domain"], path=cookie["path"])
+
+        base_url = os.getenv("BLACKBOARD_BASE_URL", "https://mef.blackboard.com").rstrip("/")
+        test_url = f"{base_url}/learn/api/v1/users/me"
+
+        # Fast timeout so it doesn't slow down the boot process
+        response = session.get(test_url, timeout=5)
+
+        # 200 OK means the cookies are alive and authorized
+        return response.status_code == 200
+    except Exception as e:
+        logger.debug("Session validation check failed: %s", e)
+        return False
 
 
 def ensure_state_security() -> None:
@@ -49,6 +77,13 @@ def get_browser_state_path() -> Path | None:
     """
     if not STATE_FILE.is_file() or STATE_FILE.stat().st_size == 0:
         return None
+
+    if not _is_state_valid(STATE_FILE):
+        logger.warning("Saved session expired on the server. Deleting stale state...")
+        STATE_FILE.unlink(missing_ok=True)
+        return None
+
+    logger.debug("Active session validated via API.")
 
     try:
         with STATE_FILE.open("r", encoding="utf-8") as f:

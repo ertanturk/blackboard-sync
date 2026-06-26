@@ -160,6 +160,7 @@ def _walk_classic_directory(
     download_queue: list[FileNode],
     visited_urls: set[str],
     max_depth: int = 8,
+    course_id: str | None = None,
 ) -> None:
     """Recursively walks a Classic layout content directory using direct URL navigation.
 
@@ -173,6 +174,7 @@ def _walk_classic_directory(
         download_queue: Shared list collecting FileNode objects for download.
         visited_urls: Set of already-visited URLs to prevent infinite recursion.
         max_depth: Maximum recursion depth as a circuit breaker.
+        course_id: The course ID for this directory, if known.
     """
     if max_depth <= 0:
         logger.warning("Max recursion depth reached in Classic walk. Aborting branch at: %s", url)
@@ -253,12 +255,24 @@ def _walk_classic_directory(
                     logger.warning("Could not extract BB ID for item '%s'. Skipping.", title_text)
                     continue
 
+                link_node = item.locator("h3 a").first
+                if link_node.count() > 0:
+                    href = link_node.get_attribute("href") or ""
+                    # Classic'te href doğrudan "/bbcswebdav/..." adresidir!
+                    download_url = f"{base_url}{href}?download=true" if href.startswith("/") else href
+                else:
+                    download_url = ""
+
+                cookies = {c["name"]: c["value"] for c in page.context.cookies(download_url)}
+
                 node = FileNode(
                     TITLE=title_text,
                     FILE_TYPE=ext.lstrip(".") if ext else "document",
                     LOCAL_TARGET_PATH=current_path / sanitized_title,
                     BLACKBOARD_ID=bb_id,
                     IS_FOLDER=False,
+                    BLACKBOARD_DOWNLOAD_URL=download_url,
+                    COOKIES=cookies,
                 )
                 download_queue.append(node)
                 logger.debug("Queued (classic): %s", node)
@@ -383,12 +397,33 @@ def _parse_modern_api(
                     logger.debug("Skipping file with unsupported extension '%s': %s", ext, title)
                     continue
 
+                content_detail = item.get("contentDetail", {})
+                file_info = content_detail.get("resource/x-bb-file", {}).get("file", {})
+                permanent_url = file_info.get("permanentUrl")
+
+                if permanent_url:
+                    logger.debug("Using permanent URL for '%s': %s", title, permanent_url)
+                    download_url = f"{base_url}{permanent_url}?download=true"
+                else:
+                    logger.debug("Using fallback URL for '%s': %s", title, download_url)
+                    download_url = (
+                        f"{base_url}/learn/api/public/v1/courses/{course_id}/contents/{item_id}/attachments"
+                    )
+
+                try:
+                    cookies = {c["name"]: c["value"] for c in page.context.cookies(download_url)}
+                except PlaywrightError as e:
+                    logger.warning("Could not retrieve cookies for '%s': %s", title, e)
+                    cookies = None
+
                 node = FileNode(
                     TITLE=title,
                     FILE_TYPE=ext.lstrip(".") if ext else "document",
                     LOCAL_TARGET_PATH=current_path / sanitized_title,
                     BLACKBOARD_ID=item_id,
                     IS_FOLDER=False,
+                    BLACKBOARD_DOWNLOAD_URL=download_url,
+                    COOKIES=cookies,
                 )
                 download_queue.append(node)
                 logger.debug("Queued (API): %s", node)
@@ -466,7 +501,9 @@ def parse_course_content(page: Page, course_code: str, install_dir: Path) -> lis
             return download_queue
 
         logger.info("Starting recursive Classic DOM scan from: %s", content_url)
-        _walk_classic_directory(page, content_url, course_dir, download_queue, visited_urls=set())
+        _walk_classic_directory(
+            page, content_url, course_dir, download_queue, visited_urls=set(), course_id=course_id
+        )
 
     else:
         logger.info(
