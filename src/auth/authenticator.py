@@ -3,6 +3,7 @@
 Handles Hybrid MFA auto-login and session state persistence via Playwright.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -20,7 +21,12 @@ logger = logging.getLogger(__name__)
 # Core Paths
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 STATE_DIR = BASE_DIR / ".state"
-STATE_FILE = STATE_DIR / "storage_state.json"
+
+
+def get_state_file_path(username: str) -> Path:
+    """Gets the path to the state file for the given username."""
+    safe_hash = hashlib.sha256(username.encode("utf-8")).hexdigest()[:16]
+    return STATE_DIR / f"state_{safe_hash}.json"
 
 
 def _is_state_valid(state_file: Path) -> bool:
@@ -49,7 +55,7 @@ def _is_state_valid(state_file: Path) -> bool:
         return False
 
 
-def ensure_state_security() -> None:
+def ensure_state_security(state_file: Path) -> None:
     """Ensures the state directory and file exist with secure permissions.
 
     Creates the directory with 0o700 permissions to avoid TOCTOU races.
@@ -60,13 +66,13 @@ def ensure_state_security() -> None:
         STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         STATE_DIR.chmod(0o700)
 
-        if STATE_FILE.exists():
-            STATE_FILE.chmod(0o600)
+        if state_file.exists():
+            state_file.chmod(0o600)
     except OSError as e:
         logger.warning("Could not enforce strict permissions on state directory/file: %s", e)
 
 
-def get_browser_state_path() -> Path | None:
+def get_browser_state_path(username: str) -> Path | None:
     """Checks for the existence and validity of a saved browser session.
 
     Validates that the file exists, is readable, and contains at least one
@@ -75,24 +81,26 @@ def get_browser_state_path() -> Path | None:
     Returns:
         The Path to the state file if valid, otherwise None.
     """
-    if not STATE_FILE.is_file() or STATE_FILE.stat().st_size == 0:
+
+    state_file = get_state_file_path(username)
+    if not state_file.is_file() or state_file.stat().st_size == 0:
         return None
 
-    if not _is_state_valid(STATE_FILE):
+    if not _is_state_valid(state_file=state_file):
         logger.warning("Saved session expired on the server. Deleting stale state...")
-        STATE_FILE.unlink(missing_ok=True)
+        state_file.unlink(missing_ok=True)
         return None
 
     logger.debug("Active session validated via API.")
 
     try:
-        with STATE_FILE.open("r", encoding="utf-8") as f:
+        with state_file.open("r", encoding="utf-8") as f:
             data = json.load(f)
 
         cookies = data.get("cookies") if isinstance(data, dict) else None
 
         if isinstance(cookies, list) and len(cookies) > 0:
-            return STATE_FILE
+            return state_file
 
         logger.warning(
             "State file exists but contains no valid cookies. Ignoring.",
@@ -144,11 +152,13 @@ def login(headful: bool = False) -> Path | None:
         logger.error("Missing credentials. Please check your .env file.")
         return None
 
+    state_file = get_state_file_path(username)
+
     # Force headful on first login so the user can complete MFA interactively.
-    is_first_login = get_browser_state_path() is None
+    is_first_login = get_browser_state_path(username=username) is None
     show_browser = headful or is_first_login
 
-    ensure_state_security()
+    ensure_state_security(state_file)
     logger.info("Initializing Playwright browser...")
 
     cfg = Config()
@@ -242,11 +252,11 @@ def login(headful: bool = False) -> Path | None:
                     return None
 
             logger.info("Saving session cookies and local storage...")
-            context.storage_state(path=STATE_FILE)
-            ensure_state_security()
-            logger.info("[green] Session successfully saved to %s[/green]", STATE_FILE.name)
+            context.storage_state(path=state_file)
+            ensure_state_security(state_file)
+            logger.info("[green] Session successfully saved to %s[/green]", state_file.name)
 
-            return STATE_FILE
+            return state_file
 
     except PlaywrightError as e:
         logger.error("Playwright encountered a critical error: %s", e)
@@ -268,11 +278,17 @@ def login_or_load_state(headful: bool = False) -> Path | None:
     Returns:
         Path to the valid state file, or None if authentication failed.
     """
-    state_path = get_browser_state_path()
 
-    if state_path:
+    username = os.getenv("BLACKBOARD_USERNAME")
+    if not username:
+        logger.error("Missing credentials. Please check your .env file.")
+        return None
+
+    state_file = get_browser_state_path(username=username)
+
+    if state_file:
         logger.info("[green] Valid session found. Skipping login step.[/green]")
-        return state_path
+        return state_file
 
     logger.info("No valid session found. Initiating fresh login sequence.")
     return login(headful=headful)

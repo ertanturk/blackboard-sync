@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 from tqdm import tqdm
 
 from src.models.file_node import FileNode
@@ -27,6 +28,37 @@ _thread_local = threading.local()
 # Global locks to prevent race conditions on identical file paths
 _download_locks: dict[Path, threading.Lock] = {}
 _download_locks_guard = threading.Lock()
+
+
+def _is_transient_error(exception: Exception) -> bool:
+    """Determines if the exception is a transient error that should be retried."""
+    if isinstance(exception, (requests.Timeout, requests.ConnectionError)):
+        return True
+    if isinstance(exception, requests.HTTPError) and exception.response is not None:
+        status_code = exception.response.status_code
+        # 429 Too Many Requests or 5xx Internal Server Errors
+        return status_code == 429 or 500 <= status_code < 600
+    return False
+
+
+@retry(
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=2, max=10, exp_base=2),
+    retry=retry_if_exception_type(Exception),
+    reraise=True,
+)
+def _make_authenticated_request(session: requests.Session, url: str) -> requests.Response:
+    """Authenticated request with retry logic using tenacity."""
+    try:
+        response = session.get(url, stream=True, timeout=(5, 30))
+        response.raise_for_status()
+        return response
+    except Exception as exc:
+        if not _is_transient_error(exc):
+            raise exc
+
+        logger.warning(f"Transient error occurred: {exc}. Retrying...")
+        raise exc
 
 
 def _get_download_lock(path: Path) -> threading.Lock:
@@ -125,94 +157,76 @@ def _download_worker(node: FileNode, state_path: Path, force_override: bool) -> 
 
         for _ in range(MAX_ATTACHMENT_LOOKUPS):
             try:
-                with session.get(current_url, stream=True, timeout=(10, 60)) as response:
-                    response.raise_for_status()
-                    content_type = response.headers.get("Content-Type", "")
+                response = _make_authenticated_request(session, current_url)
+                content_type = response.headers.get("Content-Type", "")
 
-                    # Blackboard sometimes returns a JSON pointer to the actual file attachment
-                    if "application/json" in content_type:
-                        data = response.json()
-                        results = data.get("results", [])
+                # Blackboard sometimes returns a JSON pointer to the actual file attachment
+                if "application/json" in content_type:
+                    data = response.json()
+                    results = data.get("results", [])
 
-                        if not results:
-                            logger.warning("Empty JSON results array for node: %s", node.TITLE)
+                    if not results:
+                        logger.warning("Empty JSON results array for node: %s", node.TITLE)
+                        return "ERROR"
+
+                    attachment_id = results[0].get("id")
+                    if not attachment_id:
+                        logger.warning("Missing 'id' in JSON results for node: %s", node.TITLE)
+                        return "ERROR"
+
+                    match = re.search(r"/courses/(_\d+_\d+)", current_url)
+                    if not match:
+                        logger.warning("Failed to extract course ID from URL: %s", current_url)
+                        return "ERROR"
+
+                    course_id = match.group(1)
+                    base_url = os.getenv("BLACKBOARD_BASE_URL", "https://mef.blackboard.com").rstrip("/")
+
+                    # Loop safely without modifying the shared FileNode object
+                    resolved_url = f"{base_url}/learn/api/v1/courses/{course_id}/contents/{attachment_id}/attachments/{attachment_id}/download"
+                    current_url = resolved_url
+                    continue
+
+                # Direct File Stream
+                target_path = node.LOCAL_TARGET_PATH
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Worker-unique temp file to prevent partial write collisions
+                temp_path = target_path.with_name(f"{target_path.name}.{uuid.uuid4().hex}.part")
+
+                success = False
+                try:
+                    expected_len = response.headers.get("Content-Length")
+                    written = 0
+
+                    with Path(temp_path).open("wb") as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                                written += len(chunk)
+
+                    # Validate Content-Length to guard against truncated network drops
+                    if expected_len is not None:
+                        if written != int(expected_len):
+                            logger.error(
+                                "Truncated download for %s. Expected %s bytes, got %s.",
+                                node.TITLE,
+                                expected_len,
+                                written,
+                            )
                             return "ERROR"
 
-                        attachment_id = results[0].get("id")
-                        if not attachment_id:
-                            logger.warning("Missing 'id' in JSON results for node: %s", node.TITLE)
-                            return "ERROR"
+                    temp_path.replace(target_path)
+                    success = True
+                    return "DOWNLOADED"
 
-                        match = re.search(r"/courses/(_\d+_\d+)", current_url)
-                        if not match:
-                            logger.warning("Failed to extract course ID from URL: %s", current_url)
-                            return "ERROR"
-
-                        course_id = match.group(1)
-                        base_url = os.getenv("BLACKBOARD_BASE_URL", "https://mef.blackboard.com").rstrip("/")
-
-                        # Loop safely without modifying the shared FileNode object
-                        resolved_url = f"{base_url}/learn/api/v1/courses/{course_id}/contents/{attachment_id}/attachments/{attachment_id}/download"
-                        current_url = resolved_url
-                        continue
-
-                    # Direct File Stream
-                    target_path = node.LOCAL_TARGET_PATH
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    # Worker-unique temp file to prevent partial write collisions
-                    temp_path = target_path.with_name(f"{target_path.name}.{uuid.uuid4().hex}.part")
-
-                    success = False
-                    try:
-                        expected_len = response.headers.get("Content-Length")
-                        written = 0
-
-                        with Path(temp_path).open("wb") as f:
-                            for chunk in response.iter_content(chunk_size=8192):
-                                if chunk:
-                                    f.write(chunk)
-                                    written += len(chunk)
-
-                        # Validate Content-Length to guard against truncated network drops
-                        if expected_len is not None:
-                            if written != int(expected_len):
-                                logger.error(
-                                    "Truncated download for %s. Expected %s bytes, got %s.",
-                                    node.TITLE,
-                                    expected_len,
-                                    written,
-                                )
-                                return "ERROR"
-
-                        temp_path.replace(target_path)
-                        success = True
-                        return "DOWNLOADED"
-
-                    finally:
-                        # Absolute cleanup guarantee
-                        if not success and temp_path.exists():
-                            temp_path.unlink(missing_ok=True)
-
-            except requests.Timeout as exc:
-                logger.error("Timeout downloading %s: %s", node.TITLE, exc)
-                return "ERROR"
-            except requests.ConnectionError as exc:
-                logger.error("Connection error downloading %s: %s", node.TITLE, exc)
-                return "ERROR"
-            except requests.HTTPError as exc:
-                logger.error("HTTP error downloading %s: %s", node.TITLE, exc)
-                return "ERROR"
-            except ValueError as exc:
-                logger.error("JSON parsing error for %s: %s", node.TITLE, exc)
-                return "ERROR"
-            except OSError as exc:
-                logger.error("Disk I/O error writing %s: %s", node.TITLE, exc)
-                return "ERROR"
+                finally:
+                    # Absolute cleanup guarantee
+                    if not success and temp_path.exists():
+                        temp_path.unlink(missing_ok=True)
             except Exception as exc:
                 logger.error("Unexpected error in download worker for %s: %s", node.TITLE, exc)
                 return "ERROR"
-
         else:
             # Reached if MAX_ATTACHMENT_LOOKUPS is exhausted without a valid file stream
             logger.warning("Max redirects reached for node: %s. Aborting.", node.TITLE)

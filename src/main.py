@@ -85,7 +85,6 @@ def sync(
     start_time = time.time()
 
     cli_logger = Logger(console)
-    cli_logger.setup_logger()
 
     # Empty line for clean terminal startup
     console.print()
@@ -97,6 +96,8 @@ def sync(
         else:
             config = Config()
         config.load_config()
+
+        cli_logger.setup_logger()
 
         # Display the custom startup banner defined in logger.py
         cli_logger.print_banner(
