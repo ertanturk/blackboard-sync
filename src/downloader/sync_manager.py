@@ -5,6 +5,7 @@ Handles highly concurrent, multithreaded file downloads bypassing the UI entirel
 Utilizes Session Handoff (Playwright Cookies -> Python Requests) for maximum speed.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -15,8 +16,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
+from cachyDB.database import CachyDB  # type: ignore
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    ProgressColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
+from rich.text import Text
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
-from tqdm import tqdm
 
 from src.models.file_node import FileNode
 
@@ -28,6 +40,9 @@ _thread_local = threading.local()
 # Global locks to prevent race conditions on identical file paths
 _download_locks: dict[Path, threading.Lock] = {}
 _download_locks_guard = threading.Lock()
+
+# Global shutdown event for graceful Ctrl+C handling
+_shutdown_event = threading.Event()
 
 
 def _is_transient_error(exception: Exception) -> bool:
@@ -49,6 +64,9 @@ def _is_transient_error(exception: Exception) -> bool:
 )
 def _make_authenticated_request(session: requests.Session, url: str) -> requests.Response:
     """Authenticated request with retry logic using tenacity."""
+    if _shutdown_event.is_set():
+        raise InterruptedError("Download aborted due to shutdown event.")
+
     try:
         response = session.get(url, stream=True, timeout=(5, 30))
         response.raise_for_status()
@@ -57,7 +75,7 @@ def _make_authenticated_request(session: requests.Session, url: str) -> requests
         if not _is_transient_error(exc):
             raise exc
 
-        logger.warning(f"Transient error occurred: {exc}. Retrying...")
+        logger.warning("Transient error occurred while fetching %s: %s. Retrying...", url, exc)
         raise exc
 
 
@@ -65,6 +83,28 @@ def _get_download_lock(path: Path) -> threading.Lock:
     """Retrieves or creates a thread-safe lock for a specific file path."""
     with _download_locks_guard:
         return _download_locks.setdefault(path.resolve(), threading.Lock())
+
+
+class FileSpeedColumn(ProgressColumn):
+    """Custom column to safely display processing speed (files/sec) without NoneType errors."""
+
+    def render(self, task) -> Text:
+        speed = task.speed
+        if speed is None:
+            return Text("• [0.0 files/s]", style="dim")
+        return Text(f"• [{speed:.1f} files/s]", style="dim")
+
+
+def _calculate_checksum(file_path: Path) -> str:
+    """Reads a file in chunks and calculates its SHA-256 checksum."""
+    sha256_hash = hashlib.sha256()
+    try:
+        with file_path.open("rb") as f:
+            for byte_block in iter(lambda: f.read(65536), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+    except OSError:
+        return ""
 
 
 def _get_authenticated_session(state_path: Path) -> requests.Session | None:
@@ -130,12 +170,36 @@ def _get_authenticated_session(state_path: Path) -> requests.Session | None:
     return _thread_local.session
 
 
+db = CachyDB()
+
+
 def _download_worker(node: FileNode, state_path: Path, force_override: bool) -> str:
     """Worker function to download a single file with idempotency and retry guards."""
+    target_path = node.LOCAL_TARGET_PATH
+    file_key = hashlib.md5(str(target_path).encode()).hexdigest()
+
+    if _shutdown_event.is_set():
+        return "ERROR"
 
     # Global Pre-Check (Fast fail before lock)
-    if not force_override and node.exists_locally():
-        return "SKIPPED"
+    if not force_override and target_path.exists():
+        saved_meta = None
+        try:
+            saved_meta = db.get(table="sync_index", key=file_key)
+        except KeyError:
+            pass
+        except Exception as e:
+            logger.debug("Cache read error for %s: %s", node.TITLE, e)
+
+        if saved_meta and isinstance(saved_meta, dict):
+            stat = target_path.stat()
+
+            if stat.st_size == saved_meta.get("size") and stat.st_mtime == saved_meta.get("mtime"):
+                return "SKIPPED"
+
+            current_checksum = _calculate_checksum(target_path)
+            if current_checksum and current_checksum == saved_meta.get("checksum"):
+                return "SKIPPED"
 
     session = _get_authenticated_session(state_path)
     if not session:
@@ -201,6 +265,9 @@ def _download_worker(node: FileNode, state_path: Path, force_override: bool) -> 
 
                     with Path(temp_path).open("wb") as f:
                         for chunk in response.iter_content(chunk_size=8192):
+                            if _shutdown_event.is_set():
+                                return "ERROR"
+
                             if chunk:
                                 f.write(chunk)
                                 written += len(chunk)
@@ -216,16 +283,28 @@ def _download_worker(node: FileNode, state_path: Path, force_override: bool) -> 
                             )
                             return "ERROR"
 
-                    temp_path.replace(target_path)
                     success = True
-                    return "DOWNLOADED"
-
+                    if success:
+                        temp_path.replace(target_path)
+                        new_checksum = _calculate_checksum(target_path)
+                        if new_checksum:
+                            stat = target_path.stat()
+                            metadata_payload = {
+                                "checksum": new_checksum,
+                                "size": stat.st_size,
+                                "mtime": stat.st_mtime,
+                            }
+                            db.set(table="sync_index", key=file_key, value=metadata_payload)
+                            logger.debug(f"Metadata and Checksum indexed in cachyDB for: {node.TITLE}")
+                        return "DOWNLOADED"
                 finally:
                     # Absolute cleanup guarantee
                     if not success and temp_path.exists():
                         temp_path.unlink(missing_ok=True)
-            except Exception as exc:
-                logger.error("Unexpected error in download worker for %s: %s", node.TITLE, exc)
+            except Exception:
+                logger.exception(
+                    "Unexpected error in download worker for '%s' (Target URL: %s)", node.TITLE, current_url
+                )
                 return "ERROR"
         else:
             # Reached if MAX_ATTACHMENT_LOOKUPS is exhausted without a valid file stream
@@ -239,7 +318,8 @@ def process_queue(
     max_threads: int = 5,
     force_override: bool = False,
     install_dir: Path | None = None,
-) -> dict[str, int | str]:
+    quiet: bool = False,
+) -> dict[str, int | str | list[str]]:
     """Processes the download queue using a thread pool.
 
     Args:
@@ -247,21 +327,26 @@ def process_queue(
         state_path: Path to the Playwright storage_state.json.
         max_threads: Number of concurrent downloads (capped at 10).
         force_override: If True, bypasses idempotency checks.
+        quiet: If True, disables progress bar output.
 
     Returns:
         Statistics dictionary containing total, downloaded, skipped, and error counts.
     """
+
+    _shutdown_event.clear()
+
     # Deduplicate incoming queue strictly by physical target path
     unique = {}
     for node in queue:
         unique.setdefault(node.LOCAL_TARGET_PATH.resolve(), node)
 
     deduplicated_queue = list(unique.values())
-    stats: dict[str, int | str] = {
+    stats: dict[str, int | str | list[str]] = {
         "total": len(deduplicated_queue),
         "downloaded": 0,
         "skipped": 0,
         "errors": 0,
+        "failed_files": [],
         "install_dir": str(install_dir),
     }
 
@@ -275,6 +360,21 @@ def process_queue(
         stats["errors"] = len(deduplicated_queue)
         return stats
 
+    logging.disable(logging.INFO)
+
+    # Warmup for cachyDB
+    try:
+        db.set(table="sync_index", key="_init_lock", value={"status": "ready"})
+    except Exception:
+        pass
+    finally:
+        logging.disable(logging.NOTSET)
+        cachy_logger = logging.getLogger("cachyDB")
+        cachy_logger.setLevel(logging.WARNING)
+        cachy_logger.propagate = False
+        for handler in cachy_logger.handlers:
+            handler.setLevel(logging.WARNING)
+
     # Prevent rate-limiting bans by capping max threads
     safe_max_threads = min(max_threads, 10)
     if max_threads > 10:
@@ -282,41 +382,60 @@ def process_queue(
 
     logger.info("Starting synchronization with %d concurrent threads.", safe_max_threads)
 
-    progress_bar = tqdm(
-        total=len(deduplicated_queue),
-        desc="Synchronizing",
-        unit="file",
-        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]",
+    progress = Progress(
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(bar_width=40),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        TextColumn("<"),
+        TimeRemainingColumn(),
+        FileSpeedColumn(),
+        redirect_stdout=True,
+        redirect_stderr=True,
+        disable=quiet,
     )
 
     try:
-        with ThreadPoolExecutor(max_workers=safe_max_threads) as executor:
-            future_to_node = {
-                executor.submit(_download_worker, node, state_path, force_override): node
-                for node in deduplicated_queue
-            }
-
-            for future in as_completed(future_to_node):
-                node = future_to_node[future]
+        with progress:
+            sync_task = progress.add_task("Synchronizing...", total=len(deduplicated_queue))
+            with ThreadPoolExecutor(max_workers=safe_max_threads) as executor:
+                future_to_node = {
+                    executor.submit(_download_worker, node, state_path, force_override): node
+                    for node in deduplicated_queue
+                }
                 try:
-                    result = future.result()
-                    if result == "DOWNLOADED":
-                        stats["downloaded"] += 1
-                    elif result == "SKIPPED":
-                        stats["skipped"] += 1
-                    else:
-                        stats["errors"] += 1
-                except Exception as exc:
-                    logger.error("Thread crashed abruptly for %s: %s", node.TITLE, exc)
-                    stats["errors"] += 1
-                finally:
-                    progress_bar.update(1)
-    finally:
-        # Ensures terminal output remains clean even if user aborts (Ctrl+C)
-        progress_bar.close()
+                    for future in as_completed(future_to_node):
+                        node = future_to_node[future]
+                        try:
+                            result = future.result()
+                            if result == "DOWNLOADED":
+                                stats["downloaded"] += 1
+                            elif result == "SKIPPED":
+                                stats["skipped"] += 1
+                            else:
+                                stats["errors"] += 1
+                                stats["failed_files"].append(node.TITLE)
+                        except Exception:
+                            if not _shutdown_event.is_set():
+                                logger.exception("Thread crashed abruptly for %s", node.TITLE)
+                            stats["errors"] += 1
+                            stats["failed_files"].append(node.TITLE)
+                        finally:
+                            progress.advance(sync_task)
+                except KeyboardInterrupt:
+                    logger.warning("\n[!] Ctrl+C detected. Cancelling pending downloads and cleaning up...")
 
+                    _shutdown_event.set()
+
+                    for future in future_to_node:
+                        future.cancel()
+    finally:
         # Clean up pooled main-thread connection
         if hasattr(_thread_local, "session"):
             _thread_local.session.close()
+
+        db.close()
 
     return stats

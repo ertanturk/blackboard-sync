@@ -6,7 +6,10 @@ import re
 import textwrap
 from pathlib import Path
 
+import typer
 from dotenv import load_dotenv
+from rich.console import Console
+from rich.panel import Panel
 
 logger = logging.getLogger(__name__)
 
@@ -116,16 +119,41 @@ class Config:
         return self.DEFAULT_ENV_PATH.exists()
 
     def _create_env(self) -> None:
-        """Creates a default .env file with safe permissions.
+        """Creates an interactive .env file with safe permissions.
 
         Raises:
             ConfigError: If the directory or file cannot be created.
         """
-        env_content: str = textwrap.dedent("""\
-            BLACKBOARD_USERNAME=
-            BLACKBOARD_PASSWORD=
-            BLACKBOARD_BASE_URL=https://mef.blackboard.com/
-            TARGET_TERM=
+        console = Console()
+        console.print()
+        console.print(
+            Panel.fit(
+                "[bold cyan]Welcome to Blackboard-Sync![/bold cyan]\n"
+                "It looks like this is your first time running the tool.\n"
+                "Let's set up your basic configuration.",
+                border_style="cyan",
+            )
+        )
+        username = typer.prompt("Blackboard Username")
+        base_url = typer.prompt("Blackboard Base URL", default="https://mef.blackboard.com/")
+
+        while True:
+            target_term = typer.prompt("Target Academic Term (Format: YYYY-YYYY)", default="2024-2025")
+            if re.fullmatch(r"\d{4}-\d{4}", target_term):
+                try:
+                    self._validate_values(base_url, target_term)
+                    break
+                except ConfigError as e:
+                    console.print(f"[bold red]Error:[/bold red] {e.message}")
+            else:
+                console.print(
+                    "[bold red]Error:[/bold red] Format must be exactly YYYY-YYYY (e.g., 2024-2025)."
+                )
+
+        env_content: str = textwrap.dedent(f"""\
+            BLACKBOARD_USERNAME={username}
+            BLACKBOARD_BASE_URL={base_url}
+            TARGET_TERM={target_term}
         """)
         try:
             self.DEFAULT_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +161,11 @@ class Config:
             with os.fdopen(fd, "w") as f:
                 f.write(env_content)
 
-            logger.info("Created default .env file at %s", self.DEFAULT_ENV_PATH)
+            console.print(
+                f"\n[bold green]Configuration saved successfully to {self.DEFAULT_ENV_PATH.name}, you can use blackboard sync now.[/bold green] \n"
+            )
+
+            logger.info("Interactive setup completed. Created .env file at %s", self.DEFAULT_ENV_PATH)
         except FileExistsError:
             logger.debug(".env file already exists, skipping creation.")
         except OSError as e:
@@ -149,8 +181,8 @@ class Config:
         try:
             load_dotenv(self.DEFAULT_ENV_PATH)
 
-            if not os.getenv("BLACKBOARD_USERNAME") or not os.getenv("BLACKBOARD_PASSWORD"):
-                raise ConfigError("BLACKBOARD_USERNAME and BLACKBOARD_PASSWORD must be set in .env file")
+            if not os.getenv("BLACKBOARD_USERNAME"):
+                raise ConfigError("BLACKBOARD_USERNAME must be set in .env file")
 
             base_url = os.getenv("BLACKBOARD_BASE_URL")
             target_term = os.getenv("TARGET_TERM")

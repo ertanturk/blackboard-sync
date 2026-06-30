@@ -3,13 +3,16 @@
 Handles Hybrid MFA auto-login and session state persistence via Playwright.
 """
 
+import getpass
 import hashlib
 import json
 import logging
 import os
 from pathlib import Path
 
+import keyring
 import requests
+from keyring.errors import PasswordDeleteError
 from playwright.sync_api import Browser, BrowserContext, sync_playwright
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -18,9 +21,22 @@ from src.config import Config
 
 logger = logging.getLogger(__name__)
 
+
 # Core Paths
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 STATE_DIR = BASE_DIR / ".state"
+
+# Keyring Service
+KEYRING_SERVICE = "blackboard-sync"
+
+
+def _clear_keyring_password(username: str) -> None:
+    """Removes invalid password from the OS keyring to prevent infinite failure loops."""
+    try:
+        keyring.delete_password(KEYRING_SERVICE, username)
+        logger.info("Invalid password removed from system keyring.")
+    except PasswordDeleteError:
+        pass
 
 
 def get_state_file_path(username: str) -> Path:
@@ -145,11 +161,11 @@ def login(headful: bool = False) -> Path | None:
     import os
 
     username = os.getenv("BLACKBOARD_USERNAME")
-    password = os.getenv("BLACKBOARD_PASSWORD")
+    password = keyring.get_password(KEYRING_SERVICE, username) if username else None
     base_url = os.getenv("BLACKBOARD_BASE_URL", "https://mef.blackboard.com/")
 
     if not username or not password:
-        logger.error("Missing credentials. Please check your .env file.")
+        logger.error("Missing credentials. Please check your .env file and keyring.")
         return None
 
     state_file = get_state_file_path(username)
@@ -202,6 +218,7 @@ def login(headful: bool = False) -> Path | None:
                     if error_locator.is_visible(timeout=cfg.SHORT_WAIT_MS):
                         error_text = error_locator.inner_text().strip()
                         logger.error("Authentication failed: %s", error_text)
+                        _clear_keyring_password(username)
                         return None
                 except PlaywrightTimeoutError:
                     pass
@@ -235,6 +252,7 @@ def login(headful: bool = False) -> Path | None:
                         "Authentication failed: Invalid credentials provided. (%s)",
                         error_text,
                     )
+                    _clear_keyring_password(username)
                     return None
 
                 # No error visible — treat as a legitimate MFA prompt.

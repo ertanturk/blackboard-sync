@@ -36,47 +36,57 @@ blackboard-sync/
 
 ---
 
-## 3. EXECUTION FLOW
+## EXECUTION FLOW
 
-### Phase 1: Authentication & Session Validation (`authenticator.py`)
+### Initial Setup (Wizard)
 
-1. **Validation Check:** Reads `.state/storage_state.json` and issues a sub-second headless API ping to `/learn/api/v1/users/me` using the `requests` library.
-2. **State Branching:**
-   -> **Valid:** Session is alive. Proceeds immediately to Phase 2.
-   -> **Invalid/Missing:** Deletes stale state and launches a headful Playwright browser.
-3. **MFA Capture:** Awaits user manual login and MFA approval. Once the Blackboard stream/course URL is detected, it serializes the active cookies to `.state/storage_state.json` and terminates the browser.
+On the very first run, config.py intercepts the flow to run an Interactive Setup Wizard, generating a strict .env file without requesting any passwords.
+Phase 1: Authentication & Session Validation (`main.py` & `authenticator.py`)
 
-### Phase 2: Discovery & Parsing (`crawler/`)
+- State & Keyring Check: `main.py` checks for an active session. If missing, it checks the OS Keyring for a saved password. If no password exists, it securely prompts the user via CLI and saves it to the vault.
 
-1. **Navigation:** `navigator.py` forces "List View", fuzzy-matches the target course code against the `TARGET_TERM`, and awaits the `/outline` route.
-2. **Layout Detection:** `parser.py` detects if the course uses the Classic layout (`/cl/outline`) or the Modern Ultra layout (`/outline`).
-3. **Classic DOM Parsing:** -> Extracts the "Course Content" root URL.
-   -> Navigates via direct URLs (`listContent.jsp`) to bypass UI wrappers.
-   -> Parses standard `ul.contentList` directories and `ul#tocTree` Learning Units (Modules).
-4. **Modern API Parsing:**
-   -> Bypasses the DOM completely. Queries `/learn/api/v1/courses/{id}/contents/{node_id}/children`.
-   -> Recursively traverses `resource/x-bb-folder` and `resource/x-bb-lesson`.
-5. **Node Generation:** Filters out excluded folders (e.g., quizzes, assignments) and constructs a queue of `FileNode` objects populated with direct `BLACKBOARD_DOWNLOAD_URL` links.
+- Validation: `authenticator.py` reads `.state/storage_state.json` and issues a sub-second headless API ping to `/learn/api/v1/users/me` using the requests library.
+
+- State Branching:
+    - Valid: Session is alive. Proceeds immediately to Phase 2.
+    - Invalid/Missing: Launches a Playwright browser, pulling the secure password from the OS Keyring to attempt auto-login.
+
+- MFA Capture: If direct login fails due to MFA requirements, it awaits user manual MFA approval. Once the dashboard loads, it serializes the active cookies to `.state/storage_state.json` and terminates the browser.
+
+- Auto-Recovery: If the saved keyring password is wrong (e.g., password changed), `authenticator.py` detects the invalid credentials, evicts the bad password from the Keyring, and safely halts to prompt a fresh login on the next run.
+
+### Phase 2: Discovery & Parsing (crawler/)
+
+- Navigation: `navigator.py` forces "List View", fuzzy-matches the target course code.
+
+- Layout Detection: `parser.py` detects Classic (`/cl/outline`) or Modern (`/outline`) layouts.
+
+- Classic DOM Parsing: Extracts URLs, navigates via direct links, and parses elements.
+
+- Modern API Parsing: Bypasses DOM, queries `/learn/api/v1/courses/{id}/contents/....`
+
+- Node Generation: Filters exclusions and populates FileNode objects.
 
 ### Phase 3: Idempotent Synchronization (`sync_manager.py`)
 
-This phase abandons Playwright to avoid the severe memory overhead of the SPA, utilizing **Session Handoff** instead.
+- Pre-Check: Deduplicates and checks idempotency against local disk.
 
-1. **Pre-Check (Idempotency):** Deduplicates the incoming queue and checks if `FileNode.LOCAL_TARGET_PATH` exists on the local disk. Skips if present (unless `--force` is applied).
-2. **Session Handoff:** Injects Playwright's `storage_state.json` cookies into thread-local `requests.Session()` pools.
-3. **Concurrent Processing:** Dispatches downloads via a `ThreadPoolExecutor` (capped at 10 workers to prevent WAF rate-limiting bans).
-4. **API Resolution:** If the target URL returns a JSON pointer (common in Blackboard Ultra), the worker safely resolves the attachment ID up to 3 redirects.
-5. **Atomic Writing (Safety Guard):** -> Acquires a path-based `threading.Lock`.
-   -> Streams data into a unique, UUID-stamped `.part` file.
-   -> Verifies written bytes against the `Content-Length` header to prevent truncated files.
-   -> Atomically renames the `.part` file to the final target filename using `Path.replace()`.
+- Session Handoff: Injects Playwright cookies into requests.Session() pools.
+
+- Concurrent Processing: Dispatches downloads via a ThreadPoolExecutor.
+
+- API Resolution: Resolves Blackboard Ultra JSON pointer attachments.
+
+- Atomic Writing: Streams data to .part files with path-based locks, verifies bytes, and atomically renames.
 
 ---
 
-## 4. CRITICAL ARCHITECTURAL RULES
+## CRITICAL ARCHITECTURAL RULES
 
-- **Separation of Concerns:** The Crawler (Phase 2) must NEVER download files. The Downloader (Phase 3) must NEVER parse HTML/DOM elements. They communicate strictly via the `FileNode` data structure.
-- **Mass Downloading Strategy:** Do NOT use Playwright's native `page.expect_download()` for bulk synchronization. The memory overhead of rendering Blackboard's file previewers causes crashes. ALWAYS use the Cookie Handoff strategy to Python `requests`.
-- **Atomic I/O:** Never stream network bytes directly into the final target file. Network interruptions result in permanently corrupted partial files that trick the idempotency checker. ALWAYS stream to `.part` and atomically rename upon completion.
-- **Thread Safety:** `requests.Session` is NOT natively thread-safe when dealing with connection pools. Always use `threading.local()` to grant each worker its own isolated session context.
-- **Filesystem Safety:** Rely exclusively on `pathlib.Path` for all path manipulations to guarantee cross-platform compatibility (Windows, macOS, Linux). Use strict regex sanitization to prevent path-traversal vulnerabilities from malicious remote filenames.
+- Separation of Concerns: The Crawler must NEVER download. The Downloader must NEVER parse. The UI Prompting must reside strictly in `main.py` or `config.py`, while `authenticator.py` executes headless backend operations.
+
+- Zero-Trust Storage: Never store plaintext passwords in .env or disk logs. Always route credential storage through keyring.
+
+- Mass Downloading Strategy: ALWAYS use the Cookie Handoff strategy to Python requests to avoid Playwright memory overhead.
+
+- Atomic I/O: ALWAYS stream to .part and atomically rename upon completion to prevent corrupted partial files

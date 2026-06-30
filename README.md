@@ -8,12 +8,15 @@ Instead of manually navigating each course and downloading files individually, B
 
 - Blackboard Ultra support
 - Browser-based authentication with session persistence
+- **Secure OS Keyring credential storage (Zero plaintext passwords)**
+- **Interactive First-Time Setup Wizard**
 - Recursive course discovery
 - Incremental synchronization
 - Concurrent downloads
 - Preserves Blackboard folder structure
 - Cross-platform support (Linux, macOS, Windows)
 - Modular architecture designed for maintainability
+- Using own cachyDB (`https://github.com/ertanturk/cachyDB`)
 
 ## Requirements
 
@@ -68,7 +71,7 @@ playwright install chromium
 
 ## Configuration
 
-Blackboard Sync requires a valid `.env` configuration file before first use.
+Blackboard Sync requires a valid `.env` configuration file before first use. Run global command to trigger the Interactive Setup Wizard.
 
 See the [Usage Guide](docs/USAGE.md) for environment variables, configuration, and additional setup instructions.
 
